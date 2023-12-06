@@ -1,0 +1,86 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - maink
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SSH_HOST: ubuntu@13.40.132.125
+      SSH_IDENTITY_FILE: /home/runner/.ssh/id_rsa
+      PROJECT_NAME: ${{ github.event.repository.name }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Create SSH key file and directory
+      run: |
+        mkdir -p /home/runner/.ssh
+        echo "$SSH_PRIVATE_KEY" > /home/runner/.ssh/id_rsa
+        chmod 600 /home/runner/.ssh/id_rsa
+        eval "$(ssh-agent -s)"
+        ssh-add /home/runner/.ssh/id_rsa
+      shell: /bin/bash -e {0}
+      env:
+        SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+    - name: Check Source Directory Permissions and Contents
+      run: |
+        # Check permissions of the source directory
+        if [ -r ./ ]; then
+          echo "Source directory is readable."
+          # Print the contents of the source directory
+          ls -l ./
+        else
+          echo "Source directory is not readable or does not exist."
+          exit 1
+        fi
+      shell: /bin/bash -e {0}
+
+    - name: SSH into EC2 and delete existing files
+      run: |
+        ssh -o "StrictHostKeyChecking=no" -o "ForwardAgent=no" -i /home/runner/.ssh/id_rsa $SSH_HOST << EOF
+          rm -rf ~/projects/$PROJECT_NAME
+          sudo mkdir -p ~/projects/$PROJECT_NAME
+          sudo chown -R ubuntu ~/projects
+        EOF
+        
+
+    - name: SCP Copy to EC2
+      run: |
+        sudo scp -r -o StrictHostKeyChecking=no -o ForwardAgent=no -i /home/runner/.ssh/id_rsa * $SSH_HOST:~/projects/$PROJECT_NAME
+        sudo scp -r -o StrictHostKeyChecking=no -o ForwardAgent=no -i /home/runner/.ssh/id_rsa .env $SSH_HOST:~/projects/$PROJECT_NAME/.env
+        echo "Passed here oo"
+      shell: /usr/bin/bash -e {0}
+
+    - name: SSH into EC2 and deploy Node.js 18
+      run: |
+        ssh -i /home/runner/.ssh/id_rsa $SSH_HOST << EOF
+          # Change to your application directory
+          cd ~/projects/$PROJECT_NAME
+          # Check if the project directory exists
+          rm -rf node_modules
+          rm -rf package-lock.json
+          if [ -d $PROJECT_NAME ]; then
+            # The project directory exists,update the code with Git
+            cd $PROJECT_NAME
+            git pull
+          else
+            # The project directory doesn't exist, no need to clone
+            echo "Project directory does not exist."
+          fi
+          # Install Node.js dependencies
+          export NVM_DIR=~/.nvm
+          source ~/.nvm/nvm.sh
+          echo $(nvm --version)
+          nvm use v18.16.0
+          npm install
+          # Start your Node.js application with PM2 using npm run dev
+          pm2 restart $PROJECT_NAME --update-env || pm2 start "npm run dev -p 3000" --name $PROJECT_NAME
+        EOF
